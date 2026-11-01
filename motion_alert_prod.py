@@ -12,8 +12,14 @@ from datetime import datetime
 
 # --- KONFIGURASI ---
 SENSITIVITAS = 800
-VAR_THRESHOLD = 16
+MAX_SENSITIVITAS = 25000  # Tambahkan ini. Getaran meja biasanya > 30.000
+VAR_THRESHOLD = 32
 COOLDOWN = 2
+IGNORE_SIDE_TOP = 1.1       # samping kiri/kanan di area kepala
+IGNORE_SIDE_BOTTOM = 3.0    # samping kiri/kanan di area bawah (tangan/bahu) -> ubah sesuai kebutuhan
+IGNORE_UP = 1.1
+IGNORE_DOWN = 2.5           # ke bawah (kelipatan tinggi wajah)
+IGNORE_FLARE_START = 0.1
 SHOW_MASK = False
 MODEL_PATH = "blaze_face_short_range.tflite"
 SCREENSHOT_MAX_AGE_HOURS = 12        # Hapus screenshot yang lebih tua dari 24 jam (ubah sesuai kebutuhan)
@@ -154,6 +160,10 @@ def cleanup_old_screenshots():
     deleted = 0
     try:
         for fname in os.listdir(SCREENSHOT_DIR):
+            # Hanya hapus file screenshot buatan program ini
+            if not (fname.startswith("motion_") and fname.lower().endswith(".jpg")):
+                continue
+            
             fpath = os.path.join(SCREENSHOT_DIR, fname)
             if not os.path.isfile(fpath):
                 continue
@@ -288,12 +298,32 @@ def process_frame():
     if last_box is not None and current_time - last_box_time <= 1:
         x1_raw, y1_raw, x2_raw, y2_raw = last_box
         w_box, h_box = x2_raw - x1_raw, y2_raw - y1_raw
-        x1 = max(0, x1_raw - int(w_box * 1.1))
-        y1 = max(0, y1_raw - int(h_box * 1.1))
-        x2 = min(w, x2_raw + int(w_box * 1.1))
-        y2 = min(h, y2_raw + int(h_box * 2.5))
-        cv2.rectangle(ignore_mask, (x1, y1), (x2, y2), 255, -1)
-        face_boxes.append((x1, y1, x2, y2))
+
+        # Batas atas & bawah
+        y_top = max(0, y1_raw - int(h_box * IGNORE_UP))
+        y_bot = min(h, y2_raw + int(h_box * IGNORE_DOWN))
+
+        # Lebar di bagian atas (kepala) dan bawah (pojok tangan)
+        x1_top = max(0, x1_raw - int(w_box * IGNORE_SIDE_TOP))
+        x2_top = min(w, x2_raw + int(w_box * IGNORE_SIDE_TOP))
+        x1_bot = max(0, x1_raw - int(w_box * IGNORE_SIDE_BOTTOM))
+        x2_bot = min(w, x2_raw + int(w_box * IGNORE_SIDE_BOTTOM))
+
+        # Titik di mana zona mulai melebar (sekitar dagu)
+        y_mid = max(y_top, min(h, y2_raw + int(h_box * IGNORE_FLARE_START)))
+
+        # Poligon: kepala sempit -> melebar ke pojok bawah
+        polygon = np.array([
+            [x1_top, y_top],
+            [x2_top, y_top],
+            [x2_top, y_mid],
+            [x2_bot, y_bot],
+            [x1_bot, y_bot],
+            [x1_top, y_mid],
+        ], dtype=np.int32)
+
+        cv2.fillPoly(ignore_mask, [polygon], 255)
+        face_boxes.append(polygon)
 
     # 2 & 3. Deteksi gerakan HANYA jika aktif
     motion_boxes = []
@@ -313,15 +343,18 @@ def process_frame():
             area = cv2.contourArea(c)
             if area > max_area:
                 max_area = area
-            if area > SENSITIVITAS:
+            
+            # Hanya deteksi jika area di antara batas minimum dan maksimum
+            if SENSITIVITAS < area < MAX_SENSITIVITAS:
                 motion_detected = True
                 x, y, w_c, h_c = cv2.boundingRect(c)
                 motion_boxes.append((x, y, w_c, h_c))
 
     # 4. Visualisasi
-    for (x1, y1, x2, y2) in face_boxes:
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-        cv2.putText(frame, "IGNORED", (x1, y1 - 10),
+    for poly in face_boxes:
+        cv2.polylines(frame, [poly], True, (255, 0, 0), 2)
+        px, py = poly[0]
+        cv2.putText(frame, "IGNORED", (int(px), max(20, int(py) - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
     for (x, y, w_c, h_c) in motion_boxes:
